@@ -141,6 +141,7 @@ func (cfg *config) checkLogs(i int, m ApplyMsg) (string, bool) {
 	err_msg := ""
 	v := m.Command
 	for j := 0; j < len(cfg.logs); j++ {
+		//如果已提交的日志与m发生冲突
 		if old, oldok := cfg.logs[j][m.CommandIndex]; oldok && old != v {
 			log.Printf("%v: log %v; server %v\n", i, cfg.logs[i], cfg.logs[j])
 			// some server has already committed a different value for this entry!
@@ -148,6 +149,7 @@ func (cfg *config) checkLogs(i int, m ApplyMsg) (string, bool) {
 				m.CommandIndex, i, m.Command, j, old)
 		}
 	}
+	//如果已提交的日志与m没有发生冲突就加入到已提交的log：cfg.log中
 	_, prevok := cfg.logs[i][m.CommandIndex-1]
 	cfg.logs[i][m.CommandIndex] = v
 	if m.CommandIndex > cfg.maxIndex {
@@ -159,6 +161,7 @@ func (cfg *config) checkLogs(i int, m ApplyMsg) (string, bool) {
 // applier reads message from apply ch and checks that they match the log
 // contents
 func (cfg *config) applier(i int, applyCh chan ApplyMsg) {
+	//这个循环会一直进行下去，applyCh是已提交的日志
 	for m := range applyCh {
 		if m.CommandValid == false {
 			// ignore other types of ApplyMsg
@@ -487,17 +490,19 @@ func (cfg *config) checkNoLeader() {
 // how many servers think a log entry is committed?
 func (cfg *config) nCommitted(index int) (int, interface{}) {
 	count := 0
-	var cmd interface{} = nil
+	var cmd interface{} = nil // 一个用来记录在index上各个实例存储的相同的日志项
 	for i := 0; i < len(cfg.rafts); i++ {
-		if cfg.applyErr[i] != "" {
+		if cfg.applyErr[i] != "" {// cfg.applyErr数组负责存储 ”捕捉错误的协程“ 收集到的错误，如果不空，则说明捕捉到异常
 			cfg.t.Fatal(cfg.applyErr[i])
 		}
-
 		cfg.mu.Lock()
+		// logs[i][index]负责存储检测线程提取到的每一个raft节点所有的提交项，i是实例id，index是测试程序生成的日志项，
+        // 如果某一个日志项在所有节点上的index位置上都被提交了，则有logs[i][0]==logs[i][1]==logs[i][2]=...==logs[i][n]
 		cmd1, ok := cfg.logs[i][index]
 		cfg.mu.Unlock()
-
 		if ok {
+			// 相反如果在index这个位置上有一个实例填充了数据（视为提交）但是不与其他实例相同，则会发生不匹配的现象，抛异常
+            // 如果某一个实例没有在这个位置上填充数据（等同没有提交），则cfg.logs[i][index]的ok为false，此时虽然也不匹配但是不会抛异常
 			if count > 0 && cmd != cmd1 {
 				cfg.t.Fatalf("committed values do not match: index %v, %v, %v",
 					index, cmd, cmd1)
@@ -506,7 +511,7 @@ func (cfg *config) nCommitted(index int) (int, interface{}) {
 			cmd = cmd1
 		}
 	}
-	return count, cmd
+	return count, cmd // 返回有多少个节点认为第index数据已经提交，以及提交的日志项
 }
 
 // wait for at least n servers to commit.
@@ -562,24 +567,30 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 			starts = (starts + 1) % cfg.n
 			var rf *Raft
 			cfg.mu.Lock()
+			//找到一个在线的节点
 			if cfg.connected[starts] {
 				rf = cfg.rafts[starts]
 			}
 			cfg.mu.Unlock()
+			//rf的start函数，会返回该日志项在leader节点中的日志数组的索引位置，任期以及是否是leader，如果找到了leader则break
 			if rf != nil {
 				index1, _, ok := rf.Start(cmd)
 				if ok {
+					//找到了一个leader
 					index = index1
 					break
 				}
 			}
 		}
-
+		//找到了leader节点
 		if index != -1 {
 			// somebody claimed to be the leader and to have
 			// submitted our command; wait a while for agreement.
 			t1 := time.Now()
+			// 下面这个循环的意思是每隔20ms就轮询一次已经提交内容为cmd的日志项的节点数量是否大于等于expectedServers
+			// 为什么是2s内呢？因为正常情况下2s内一定能确认所有的节点都能够提交成功
 			for time.Since(t1).Seconds() < 2 {
+				//针对index日志有多少提交了
 				nd, cmd1 := cfg.nCommitted(index)
 				if nd > 0 && nd >= expectedServers {
 					// committed
@@ -590,6 +601,7 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 				}
 				time.Sleep(20 * time.Millisecond)
 			}
+			// 如果不是则看是否重试，不允许重试就抛异常
 			if retry == false {
 				cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
 			}

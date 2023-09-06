@@ -21,6 +21,7 @@ const RaftElectionTimeout = 1000 * time.Millisecond
 
 func TestInitialElection2A(t *testing.T) {
 	servers := 3
+	
 	cfg := make_config(t, servers, false, false)
 	defer cfg.cleanup()
 
@@ -125,6 +126,7 @@ func TestManyElections2A(t *testing.T) {
 
 func TestBasicAgree2B(t *testing.T) {
 	servers := 3
+	//配置好3个raft
 	cfg := make_config(t, servers, false, false)
 	defer cfg.cleanup()
 
@@ -132,12 +134,14 @@ func TestBasicAgree2B(t *testing.T) {
 
 	iters := 3
 	for index := 1; index < iters+1; index++ {
+		// 返回有多少个节点认为第index数据已经提交，以及提交的日志项
 		nd, _ := cfg.nCommitted(index)
 		if nd > 0 {
 			t.Fatalf("some have committed before Start()")
 		}
-
+		//向leader发送一个日志，返回该日志所在的位置
 		xindex := cfg.one(index*100, servers, false)
+		DPrintf("罗：xindex is %d", xindex)
 		if xindex != index {
 			t.Fatalf("got index %v but expected %v", xindex, index)
 		}
