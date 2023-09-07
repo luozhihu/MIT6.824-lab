@@ -89,19 +89,26 @@ func (rf *Raft) HandleAppendEntriesRPC(args *RequestAppendEntriesArgs, reply *Re
 	rf.resetElectionTimer()
 	rf.state = Follower // 需要转变自己的保持为Follower
 
+	//对自己来说是一个新leader来了
 	if args.LeaderTerm > rf.currentTerm {
 		rf.votedFor = None // 调整votedFor为-1
 		rf.currentTerm = args.LeaderTerm
 		reply.FollowerTerm = rf.currentTerm
+		
 	}
-
+	defer rf.persist()
 	if args.PrevLogIndex+1 < rf.log.FirstLogIndex || args.PrevLogIndex > rf.log.LastLogIndex {
+		/*
+			任期号越界了
+
+		*/
 		DPrintf("args.PrevLogIndex is %d, out of index...", args.PrevLogIndex)
 		reply.FollowerTerm = rf.currentTerm
 		reply.Success = false
 		reply.PrevLogIndex = rf.log.LastLogIndex
 		reply.PrevLogTerm = rf.getLastEntryTerm()
 	} else if rf.getEntryTerm(args.PrevLogIndex) == args.PrevLogTerm {
+		//follower在leader的PrevLogIndex位置日志的任期 == leader的PrevLogIndex位置日志的任期
 		ok := true
 		for i, entry := range args.Entries {
 			index := args.PrevLogIndex + 1 + i
@@ -117,11 +124,13 @@ func (rf *Raft) HandleAppendEntriesRPC(args *RequestAppendEntriesArgs, reply *Re
 			rf.log.LastLogIndex = args.PrevLogIndex + len(args.Entries)
 		}
 		if args.LeaderCommit > rf.commitIndex {
+			//跟新提交位置
 			if args.LeaderCommit < rf.log.LastLogIndex {
 				rf.commitIndex = args.LeaderCommit
 			} else {
 				rf.commitIndex = rf.log.LastLogIndex
 			}
+			//唤醒状态机去消费
 			rf.applyCond.Broadcast()
 		}
 		reply.FollowerTerm = rf.currentTerm
@@ -130,7 +139,9 @@ func (rf *Raft) HandleAppendEntriesRPC(args *RequestAppendEntriesArgs, reply *Re
 		reply.PrevLogTerm = rf.getLastEntryTerm()
 		DPrintf("%v:log entries was overrited, added or done nothing, updating commitIndex to %d...", rf.SayMeL(), rf.commitIndex)
 	} else {
+		//follower在leader的PrevLogIndex位置日志的任期 != leader的PrevLogIndex位置日志的任期
 		prevIndex := args.PrevLogIndex
+		//往回找
 		for prevIndex >= rf.log.FirstLogIndex && rf.getEntryTerm(prevIndex) == rf.log.getOneEntry(args.PrevLogIndex).Term {
 			prevIndex--
 		}
@@ -190,6 +201,7 @@ func (rf *Raft) tryCommitL(matchIndex int) {
 		}
 		// DPrintf(500, "%v: commitIndex = %v ,entries=%v", rf.SayMeL(), rf.commitIndex, rf.log.Entries)
 		DPrintf("%v: 主结点已经提交了index为%d的日志，rf.applyCond.Broadcast(),rf.lastApplied=%v rf.commitIndex=%v", rf.SayMeL(), rf.commitIndex, rf.lastApplied, rf.commitIndex)
+		
 		rf.applyCond.Broadcast() // 通知对应的applier协程将日志放到状态机上验证
 	} else {
 		DPrintf("\n%v: 未超过半数节点在此索引上的日志相等，拒绝提交....\n", rf.SayMeL())

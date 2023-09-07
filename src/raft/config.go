@@ -144,6 +144,9 @@ func (cfg *config) checkLogs(i int, m ApplyMsg) (string, bool) {
 		//如果已提交的日志与m发生冲突
 		if old, oldok := cfg.logs[j][m.CommandIndex]; oldok && old != v {
 			log.Printf("%v: log %v; server %v\n", i, cfg.logs[i], cfg.logs[j])
+			//log.Printf("节点id： %v, 日志：%v\n",i, cfg.logs[i]);
+			//log.Printf("节点id： %v, 日志号：%v, 命令：%v\n",i, m.CommandIndex, v);
+			//log.Printf("冲突的节点id： %v, 日志号：%v, 命令：%v\n", j, m.CommandIndex,cfg.logs[j][m.CommandIndex]);
 			// some server has already committed a different value for this entry!
 			err_msg = fmt.Sprintf("commit index=%v server=%v %v != server=%v %v",
 				m.CommandIndex, i, m.Command, j, old)
@@ -319,6 +322,8 @@ func (cfg *config) start1(i int, applier func(int, chan ApplyMsg)) {
 	applyCh := make(chan ApplyMsg)
 
 	rf := Make(ends, i, cfg.saved[i], applyCh)
+
+	Lab2CPrintf("server id: %v, rf.votedFor: %v, rf.currentTerm: %v, rf.log: %v.\n",rf.me, rf.votedFor, rf.currentTerm, rf.log)
 
 	cfg.mu.Lock()
 	cfg.rafts[i] = rf
@@ -584,6 +589,7 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 		}
 		//找到了leader节点
 		if index != -1 {
+			//log.Printf("准备提交的日志index： %v, 命令：%v\n", index,cmd);
 			// somebody claimed to be the leader and to have
 			// submitted our command; wait a while for agreement.
 			t1 := time.Now()
@@ -591,10 +597,16 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 			// 为什么是2s内呢？因为正常情况下2s内一定能确认所有的节点都能够提交成功
 			for time.Since(t1).Seconds() < 2 {
 				//针对index日志有多少提交了
+
 				nd, cmd1 := cfg.nCommitted(index)
+
 				if nd > 0 && nd >= expectedServers {
+					// for i := 0; i < 3; i++ {
+					// 	log.Printf("server id： %v, 日志：%v\n", i, cfg.rafts[i].log);
+					// }
 					// committed
 					if cmd1 == cmd {
+						//log.Printf("提交的日志index： %v, 命令：%v\n", index,cmd);
 						// and it was the command we submitted.
 						return index
 					}

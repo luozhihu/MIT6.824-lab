@@ -8,9 +8,17 @@ import (
 
 // Debugging
 const Debug = false
+const Lab2CDebug = false
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
+		log.Printf(format, a...)
+	}
+	return
+}
+
+func Lab2CPrintf(format string, a ...interface{}) (n int, err error) {
+	if Lab2CDebug {
 		log.Printf(format, a...)
 	}
 	return

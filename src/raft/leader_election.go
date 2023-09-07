@@ -26,6 +26,7 @@ func (rf *Raft) StartElection() {
 	args.CandidateId = rf.me
 	args.LastLogIndex = rf.log.LastLogIndex
 	args.LastLogTerm = rf.getLastEntryTerm()
+	defer rf.persist()
 	DPrintf("[%d] attempting an election at term %d with my LastLogIndex %d and LastLogTerm %d", rf.me, rf.currentTerm, rf.log.LastLogIndex, args.LastLogTerm)
 
 	for i, _ := range rf.peers {
@@ -110,7 +111,7 @@ func (rf *Raft) HandleHeartbeatRPC(args *RequestAppendEntriesArgs, reply *Reques
 	defer rf.mu.Unlock()
 	reply.FollowerTerm = rf.currentTerm
 	reply.Success = true
-	// 旧任期的leader抛弃掉
+	// 旧任期的leader抛弃掉并且返回false
 	if args.LeaderTerm < rf.currentTerm {
 		reply.Success = false
 		reply.FollowerTerm = rf.currentTerm
@@ -119,7 +120,7 @@ func (rf *Raft) HandleHeartbeatRPC(args *RequestAppendEntriesArgs, reply *Reques
 	//DPrintf(200, "I am %d and the dead state is %d with term %d", rf.me)
 	DPrintf("%v: I am now receiving heartbeat from leader %d at term %d", rf.SayMeL(), args.LeaderId, args.LeaderTerm)
 	rf.resetElectionTimer()
-	// 需要转变自己的身份为Follower
+	// 只要是任期号大于等于自己，需要转变自己的身份为Follower
 	rf.state = Follower
 	rf.votedFor = args.LeaderId
 
@@ -144,6 +145,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if args.Term < rf.currentTerm {
 		DPrintf("%v: 投出反对票给节点%d, 原因：任期", rf.SayMeL(), args.CandidateId)
 		reply.VoteGranted = false
+		rf.persist()
 		return
 	}
 	if args.Term > rf.currentTerm {
@@ -166,6 +168,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.votedFor = args.CandidateId
 		rf.state = Follower
 		rf.resetElectionTimer() //自己的票已经投出时就转为follower状态
+		rf.persist()
 		DPrintf("%v: 投出同意票给节点%d", rf.SayMeL(), args.CandidateId)
 
 	} else {

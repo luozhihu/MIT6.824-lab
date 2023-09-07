@@ -18,13 +18,13 @@ package raft
 //
 
 import (
-	//	"bytes"
+	"bytes"
 	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
-
-	//	"6.5840/labgob"
+	
+	"6.5840/labgob"
 	"6.5840/labrpc"
 )
 
@@ -138,27 +138,39 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// raftstate := w.Bytes()
 	// rf.persister.Save(raftstate, nil)
+
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm) // 持久化任期
+	e.Encode(rf.votedFor)    // 持久化votedFor
+	e.Encode(rf.log)         // 持久化日志
+	data := w.Bytes()
+	go rf.persister.SaveRaftState(data)
 }
 
 
 // restore previously persisted state.
-func (rf *Raft) readPersist(data []byte) {
-	if data == nil || len(data) < 1 { // bootstrap without any state?
+func (rf *Raft) readPersist() {
+	stateData := rf.persister.ReadRaftState()
+	if stateData == nil || len(stateData) < 1 { // bootstrap without any state?
 		return
 	}
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	// Your code here (2C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	if stateData != nil && len(stateData) > 0 { // bootstrap without any state?
+		r := bytes.NewBuffer(stateData)
+		d := labgob.NewDecoder(r)
+		rf.votedFor = 0 // in case labgob waring
+		if d.Decode(&rf.currentTerm) != nil ||
+			d.Decode(&rf.votedFor) != nil ||
+			d.Decode(&rf.log) != nil {
+			//   error...
+			DPrintf("%v: readPersist decode error\n", rf.SayMeL())
+			panic("")
+		}
+		Lab2CPrintf("server id: %v, rf.votedFor: %v, rf.currentTerm: %v, rf.log: %v.\n",rf.me, rf.votedFor, rf.currentTerm, rf.log)
+	}
 }
 
 
@@ -252,6 +264,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 // if it's ever committed. the second return value is the current
 // term. the third return value is true if this server believes it is
 // the leader.
+
 //返回值是（日志号，日志任期，是否是leader）
 //如果是follwer那么直接返回（-1，当前任期，false）
 //如果是leader那么将log保存然后复制到其他服务器，并且立即返回
@@ -276,8 +289,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	DPrintf("%v: a command index=%v cmd=%T %v come", rf.SayMeL(), index, command, command)
 	//将log保存到raft.log中
 	rf.log.appendL(Entry{term, command})
+	rf.persist()
 	//rf.resetTrackedIndex()
 	DPrintf("%v: check the newly added log index：%d", rf.SayMeL(), rf.log.LastLogIndex)
+	//开启一个线程将日志复制给其他节点
 	go rf.StartAppendEntries(false)
 	//-----------------------------------------------------------------
 	return index, term, isLeader
@@ -353,10 +368,9 @@ func (rf *Raft) RequestAppendEntries(args *RequestAppendEntriesArgs, reply *Requ
 	// 重置自身的选举定时器，这样自己就不会重新发出选举需求（因为它在ticker函数中被阻塞住了）
 	//log.Printf("[%v]'s electionTimeout is reset and its state converts to %v", rf.me, rf.state)
 }
+//向其他节点发送心跳或者日志
 func (rf *Raft) AppendEntries(targetServerId int, heart bool) {
-	//rf.mu.Lock()
-	//defer rf.mu.Unlock()
-
+	//如果是心跳
 	if heart {
 		rf.mu.Lock()
 		if rf.state != Leader {
@@ -370,9 +384,9 @@ func (rf *Raft) AppendEntries(targetServerId int, heart bool) {
 		DPrintf("%v: %d is a leader, ready sending heartbeart to follower %d....", rf.SayMeL(), rf.me, targetServerId)
 		rf.mu.Unlock()
 		// 发送心跳包
-
-		//rf.sendRequestAppendEntries(true, targetServerId, &args, &reply)
+		//心跳包只包含两个信息：leader任期和leader的id
 		ok := rf.sendRequestAppendEntries(true, targetServerId, &args, &reply)
+		//网络出错了，直接返回
 		if !ok {
 			return
 		}
@@ -381,23 +395,28 @@ func (rf *Raft) AppendEntries(targetServerId int, heart bool) {
 			return
 		}
 		rf.mu.Lock()
+		//别的线程已经接收到了一个更新任期的节点，那么直接返回
 		if rf.state != Leader {
 			rf.mu.Unlock()
 			return
 		}
+		//回复的日志比我小则无事发生
 		if reply.FollowerTerm < rf.currentTerm {
 			rf.mu.Unlock()
 			return
 		}
 		// 拒绝接收心跳，则可能是因为任期导致的
 		if reply.FollowerTerm > rf.currentTerm {
+			//收到一个比我任期还大的回复，那么自己就变成follower
 			rf.votedFor = None
 			rf.state = Follower
 			rf.currentTerm = reply.FollowerTerm
+			
 		}
 		rf.mu.Unlock()
 		return
 	} else {
+		//如果不是心跳
 		rf.mu.Lock()
 		if rf.state != Leader {
 			rf.mu.Unlock()
@@ -406,6 +425,7 @@ func (rf *Raft) AppendEntries(targetServerId int, heart bool) {
 		args := RequestAppendEntriesArgs{}
 		args.PrevLogIndex = min(rf.log.LastLogIndex, rf.peerTrackers[targetServerId].nextIndex-1)
 		if args.PrevLogIndex+1 < rf.log.FirstLogIndex {
+			//FirstLogIndex的初始值是1且不会变化，所以几乎不可能发生
 			DPrintf("此时 %d 节点的nextIndex为%d,LastLogIndex为 %d, 最后一项日志为：\n", rf.me, rf.peerTrackers[rf.me].nextIndex,
 				rf.log.LastLogIndex)
 			return
@@ -420,10 +440,18 @@ func (rf *Raft) AppendEntries(targetServerId int, heart bool) {
 		rf.mu.Unlock()
 
 		//fmt.Printf("\n %d is a leader, ready sending log entries to follower %d with args leaderTerm:%d, PrevLogIndex: %d, PrevLogTerm:%d, lastEntry:%v....", rf.me, targetServerId, args.LeaderTerm, args.PrevLogIndex, args.PrevLogTerm, args.Entries[args.PrevLogIndex])
+		/*非心跳包包含六个信息：
+		term：自己的任期号，
+		leaderId：自己的id，
+		prevLogIndex：前一个日志的日志号，
+		prevLogTerm：前一个日志的任期号，
+		entris：当前日志，
+		leaderCommit：已提交的日志号*/
 		reply := RequestAppendEntriesReply{}
 
 		ok := rf.sendRequestAppendEntries(false, targetServerId, &args, &reply)
 		if !ok {
+			//网络错误直接返回
 			//DPrintf(111, "%v: cannot request AppendEntries to %v args.term=%v\n", rf.SayMeL(), targetServerId, args.LeaderTerm)
 			return
 		}
@@ -433,7 +461,7 @@ func (rf *Raft) AppendEntries(targetServerId int, heart bool) {
 			//rf.mu.Unlock()
 			return
 		}
-		// 丢弃旧的rpc响应
+		// 丢弃旧的rpc响应。旧的rpc响应意味着旧的日志
 		if reply.FollowerTerm < rf.currentTerm {
 			return
 		}
@@ -441,17 +469,21 @@ func (rf *Raft) AppendEntries(targetServerId int, heart bool) {
 		DPrintf("%v: get reply from %v reply.Term=%v reply.Success=%v reply.PrevLogTerm=%v reply.PrevLogIndex=%v myinfo:rf.log.FirstLogIndex=%v rf.log.LastLogIndex=%v\n",
 			rf.SayMeL(), targetServerId, reply.FollowerTerm, reply.Success, reply.PrevLogTerm, reply.PrevLogIndex, rf.log.FirstLogIndex, rf.log.LastLogIndex)
 		if reply.FollowerTerm > rf.currentTerm {
+			//收到一个比我任期还大的回复，那么自己就变成follower
 			rf.state = Follower
 			rf.currentTerm = reply.FollowerTerm
 			rf.votedFor = None
+			rf.persist()
 			return
 		}
 		DPrintf("%v: get append reply reply.PrevLogIndex=%v reply.PrevLogTerm=%v reply.Success=%v heart=%v\n", rf.SayMeL(), reply.PrevLogIndex, reply.PrevLogTerm, reply.Success, heart)
 
 		if reply.Success {
+			//如果成功了就修改这个节点的下一个日志号
 			rf.peerTrackers[targetServerId].nextIndex = args.PrevLogIndex + len(args.Entries) + 1
 			rf.peerTrackers[targetServerId].matchIndex = args.PrevLogIndex + len(args.Entries)
 			DPrintf("success! now trying to commit the log...\n")
+			//然后尝试进行提交日志，（大于一半才能成功）
 			rf.tryCommitL(rf.peerTrackers[targetServerId].matchIndex)
 			return
 		}
@@ -465,14 +497,17 @@ func (rf *Raft) AppendEntries(targetServerId int, heart bool) {
 			return
 		}
 		//rf.mu.Unlock()
+		//回复的日志号大于leader的日志号
 		if reply.PrevLogIndex > rf.log.LastLogIndex {
 			rf.peerTrackers[targetServerId].nextIndex = rf.log.LastLogIndex + 1
 		} else if rf.getEntryTerm(reply.PrevLogIndex) == reply.PrevLogTerm {
+			//如果follower的节点的任期等于同样日志号的leader的日志的任期
 			// 因为响应方面接收方做了优化，作为响应方的从节点可以直接跳到索引不匹配但是等于任期PrevLogTerm的第一个提交的日志记录
 			rf.peerTrackers[targetServerId].nextIndex = reply.PrevLogIndex + 1
 		} else {
 			// 此时rf.getEntryTerm(reply.PrevLogIndex) != reply.PrevLogTerm，也就是说此时索引相同位置上的日志提交时所处term都不同，
 			// 则此日志也必然是不同的，所以可以安排跳到前一个当前任期的第一个节点
+			//如果follower的节点的任期等于同样日志号的leader的日志的任期
 			PrevIndex := reply.PrevLogIndex
 			for PrevIndex >= rf.log.FirstLogIndex && rf.getEntryTerm(PrevIndex) == rf.getEntryTerm(reply.PrevLogIndex) {
 				PrevIndex--
@@ -592,12 +627,14 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.votedFor = None
 	rf.state = Follower                    //设置节点的初始状态为follower
 	rf.heartbeatTimeout = heartbeatTimeout // 这个是固定的
+	rf.log = NewLog()
 	//---------------------------------------------------------------
 
 	// initialize from state persisted before a crash
-	rf.readPersist(persister.ReadRaftState())
+	rf.readPersist()	
+	Lab2CPrintf("make: server id: %v, rf.votedFor: %v, rf.currentTerm: %v, rf.log: %v.\n",rf.me, rf.votedFor, rf.currentTerm, rf.log)
 	//-----------------------------------------------------------
-	rf.log = NewLog()
+	//rf.log = NewLog()
 	rf.applyHelper = NewApplyHelper(applyCh, rf.lastApplied)
 	rf.commitIndex = 0
 	rf.lastApplied = 0
